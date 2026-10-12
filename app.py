@@ -33,8 +33,10 @@ init_db()
 # ================= 2. 系統設定與狀態初始化 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
 
-if 'edit_q_id' not in st.session_state:
-    st.session_state.edit_q_id = None
+# 初始化修改狀態變數 (防呆用)
+if 'edit_q_id' not in st.session_state: st.session_state.edit_q_id = None
+if 'edit_emp_id' not in st.session_state: st.session_state.edit_emp_id = None
+if 'edit_role_name' not in st.session_state: st.session_state.edit_role_name = None
 
 current_year = datetime.now().year
 periods = [f"{y}-Q{q}" for y in range(2026, current_year + 3) for q in range(1, 5)]
@@ -45,8 +47,9 @@ menu = st.sidebar.radio("系統導覽", ["進行稽核", "稽核紀錄 (含篩�
 
 if menu == "員工與職位建檔":
     st.title("員工與職位管理")
-    col1, col2 = st.columns(2)
     
+    # --- 上半部：新增區塊 ---
+    col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. 新增職位")
         with st.form("add_role_form"):
@@ -60,12 +63,10 @@ if menu == "員工與職位建檔":
                         c.execute("INSERT INTO roles (name, department, is_hourly, weight) VALUES (?, ?, ?, ?)", (new_role_name, new_dept, 1 if is_hourly else 0, weight))
                         conn.commit()
                         st.success(f"已新增：{new_dept} - {new_role_name}")
+                        st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("此職位已存在！")
-        
-        roles_df = pd.read_sql("SELECT department as 部門, name as 職稱, CASE WHEN is_hourly=1 THEN '是' ELSE '否' END as 時薪制, weight as 分潤權重 FROM roles ORDER BY department, weight DESC", conn)
-        st.dataframe(roles_df, hide_index=True)
-
+                        
     with col2:
         st.subheader("2. 新增員工")
         role_list = [f"{r[0]} ({r[1]})" for r in c.execute("SELECT name, department FROM roles").fetchall()]
@@ -79,9 +80,126 @@ if menu == "員工與職位建檔":
                 c.execute("INSERT INTO employees (name, department, role, hourly_wage) VALUES (?, ?, ?, ?)", (emp_name, dept, emp_role, emp_wage))
                 conn.commit()
                 st.success(f"已新增員工：{emp_name} ({dept})")
+                st.rerun()
+
+    st.markdown("---")
+    
+    # --- 下半部：修改與刪除區塊 (使用 Tabs 分類更寬敞) ---
+    tab_emps, tab_roles = st.tabs(["👥 現有員工清單 (修改/刪除)", "👔 現有職位清單 (修改/刪除)"])
+    
+    with tab_emps:
+        st.subheader("員工資料管理")
+        emps = c.execute("SELECT id, name, department, role, hourly_wage FROM employees ORDER BY department").fetchall()
+        if not emps:
+            st.info("尚無員工資料。")
+        else:
+            h1, h2, h3, h4, h5 = st.columns([2, 2, 3, 2, 2])
+            h1.write("**姓名**")
+            h2.write("**部門**")
+            h3.write("**職位**")
+            h4.write("**當前時薪**")
+            h5.write("**操作**")
+            st.divider()
+            
+            for emp in emps:
+                e_id, e_name, e_dept, e_role, e_wage = emp
+                c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 2, 2])
                 
-        emps_df = pd.read_sql("SELECT id, name as 姓名, department as 部門, role as 職位, hourly_wage as 時薪 FROM employees ORDER BY department", conn)
-        st.dataframe(emps_df, hide_index=True)
+                if st.session_state.edit_emp_id == e_id:
+                    new_name = c1.text_input("姓名", value=e_name, key=f"e_name_{e_id}", label_visibility="collapsed")
+                    
+                    role_options = [f"{r[0]} ({r[1]})" for r in c.execute("SELECT name, department FROM roles").fetchall()]
+                    current_opt = f"{e_role} ({e_dept})"
+                    idx = role_options.index(current_opt) if current_opt in role_options else 0
+                        
+                    c2.markdown("*隨職位變動*")
+                    new_role_str = c3.selectbox("職位", role_options, index=idx, key=f"e_role_{e_id}", label_visibility="collapsed")
+                    new_wage = c4.number_input("時薪", min_value=0, value=int(e_wage), step=5, key=f"e_wage_{e_id}", label_visibility="collapsed")
+                    
+                    c5a, c5b = c5.columns(2)
+                    if c5a.button("✅", key=f"e_save_{e_id}"):
+                        nr = new_role_str.split(" (")[0]
+                        nd = c.execute("SELECT department FROM roles WHERE name=?", (nr,)).fetchone()[0]
+                        c.execute("UPDATE employees SET name=?, department=?, role=?, hourly_wage=? WHERE id=?", (new_name, nd, nr, new_wage, e_id))
+                        conn.commit()
+                        st.session_state.edit_emp_id = None
+                        st.rerun()
+                    if c5b.button("❌", key=f"e_cancel_{e_id}"):
+                        st.session_state.edit_emp_id = None
+                        st.rerun()
+                else:
+                    c1.write(e_name)
+                    c2.write(e_dept)
+                    c3.write(e_role)
+                    c4.write(e_wage)
+                    
+                    c5a, c5b = c5.columns(2)
+                    if c5a.button("✏️ 修改", key=f"e_edit_{e_id}"):
+                        st.session_state.edit_emp_id = e_id
+                        st.rerun()
+                    if c5b.button("🗑️ 刪除", key=f"e_del_{e_id}"):
+                        c.execute("DELETE FROM employees WHERE id=?", (e_id,))
+                        conn.commit()
+                        st.rerun()
+                st.markdown("---")
+
+    with tab_roles:
+        st.subheader("職位資料管理")
+        st.info("💡 提示：若修改職稱或部門名稱，系統會自動同步更新底下所有員工與題庫的對應標籤。")
+        roles = c.execute("SELECT name, department, is_hourly, weight FROM roles ORDER BY department, weight DESC").fetchall()
+        if not roles:
+            st.info("尚無職位資料。")
+        else:
+            rh1, rh2, rh3, rh4, rh5 = st.columns([3, 3, 2, 2, 2])
+            rh1.write("**所屬部門**")
+            rh2.write("**職位名稱**")
+            rh3.write("**時薪制PT**")
+            rh4.write("**分潤權重**")
+            rh5.write("**操作**")
+            st.divider()
+            
+            for role_data in roles:
+                r_name, r_dept, r_hourly, r_weight = role_data
+                rc1, rc2, rc3, rc4, rc5 = st.columns([3, 3, 2, 2, 2])
+                
+                if st.session_state.edit_role_name == r_name:
+                    new_dept = rc1.text_input("部門", value=r_dept, key=f"r_dept_{r_name}", label_visibility="collapsed")
+                    new_name = rc2.text_input("職稱", value=r_name, key=f"r_name_{r_name}", label_visibility="collapsed")
+                    new_hourly = rc3.checkbox("是", value=bool(r_hourly), key=f"r_hr_{r_name}")
+                    new_weight = rc4.number_input("權重", min_value=0.0, value=float(r_weight), step=0.5, key=f"r_wt_{r_name}", label_visibility="collapsed")
+                    
+                    rc5a, rc5b = rc5.columns(2)
+                    if rc5a.button("✅", key=f"r_save_{r_name}"):
+                        if new_name and new_dept:
+                            try:
+                                c.execute("UPDATE roles SET name=?, department=?, is_hourly=?, weight=? WHERE name=?", (new_name, new_dept, 1 if new_hourly else 0, new_weight, r_name))
+                                # 自動連動更新員工與題庫
+                                if new_name != r_name or new_dept != r_dept:
+                                    c.execute("UPDATE employees SET role=?, department=? WHERE role=?", (new_name, new_dept, r_name))
+                                    c.execute("UPDATE questions SET role=? WHERE role=?", (new_name, r_name))
+                                conn.commit()
+                                st.session_state.edit_role_name = None
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("修改失敗：該職位名稱已存在！")
+                    if rc5b.button("❌", key=f"r_cancel_{r_name}"):
+                        st.session_state.edit_role_name = None
+                        st.rerun()
+                else:
+                    rc1.write(r_dept)
+                    rc2.write(r_name)
+                    rc3.write("✅" if r_hourly else "❌")
+                    rc4.write(r_weight)
+                    
+                    rc5a, rc5b = rc5.columns(2)
+                    if rc5a.button("✏️ 修改", key=f"r_edit_{r_name}"):
+                        st.session_state.edit_role_name = r_name
+                        st.rerun()
+                    if rc5b.button("🗑️ 刪除", key=f"r_del_{r_name}"):
+                        c.execute("DELETE FROM roles WHERE name=?", (r_name,))
+                        conn.commit()
+                        st.rerun()
+                st.markdown("---")
 
 elif menu == "題庫設定":
     st.title("稽核題庫管理")
@@ -229,11 +347,9 @@ elif menu == "進行稽核":
                     st.markdown("---")
                         
                     if st.form_submit_button("確認並送出稽核結果"):
-                        # 防呆檢查：如果有給分，一定要寫原因
                         if bonus_score > 0 and not bonus_reason.strip():
                             st.error("❌ 若有給予額外加分，請務必填寫旁邊的「加分事蹟/原因」！")
                         else:
-                            # 加上額外加分
                             total_score = sum([d['score'] for d in scores_data.values()]) + bonus_score
                             role_info = c.execute("SELECT is_hourly FROM roles WHERE name=?", (emp_role,)).fetchone()
                             is_hourly = role_info[0] if role_info else 0
@@ -245,7 +361,6 @@ elif menu == "進行稽核":
                                 if wage_added > 0:
                                     c.execute("UPDATE employees SET hourly_wage = hourly_wage + ? WHERE id = ?", (wage_added, emp_id))
                             
-                            # 把額外加分也寫進紀錄明細裡
                             if bonus_score > 0:
                                 scores_data['extra_bonus'] = {
                                     'category': '🌟 額外加分',
