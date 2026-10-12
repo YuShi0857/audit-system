@@ -30,8 +30,12 @@ def init_db():
 
 init_db()
 
-# ================= 2. 動態期別與側邊欄 =================
+# ================= 2. 系統設定與狀態初始化 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
+
+# 初始化修改題目的狀態變數 (防呆用)
+if 'edit_q_id' not in st.session_state:
+    st.session_state.edit_q_id = None
 
 current_year = datetime.now().year
 periods = [f"{y}-Q{q}" for y in range(2026, current_year + 3) for q in range(1, 5)]
@@ -102,7 +106,7 @@ elif menu == "題庫設定":
                 st.rerun()
 
     st.markdown("---")
-    st.subheader("現有題庫清單與刪除")
+    st.subheader("現有題庫清單 (支援修改分數與刪除)")
     
     if not role_list:
         st.info("請先建立職位。")
@@ -123,24 +127,44 @@ elif menu == "題庫設定":
         else:
             df_q = pd.DataFrame(questions, columns=['id', 'role', 'category', 'title', 'description', 'max_score'])
             
-            # 1. 先依職位分群
             for r, role_group in df_q.groupby('role'):
                 st.markdown(f"### 👔 職位：{r}")
                 
-                # 2. 再依大項目分群
                 for cat, cat_group in role_group.groupby('category'):
                     st.markdown(f"#### 📂 大項目：{cat}")
                     
-                    # 3. 列出該大項目下的所有細項與刪除按鈕
                     for _, row in cat_group.iterrows():
-                        col1, col2, col3, col4 = st.columns([4, 4, 2, 2])
+                        col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
+                        
                         col1.write(f"**{row['title']}**")
                         col2.caption(row['description'] if row['description'] else "無說明")
-                        col3.write(f"滿分: {row['max_score']}")
-                        if col4.button("🗑️ 刪除", key=f"del_q_{row['id']}"):
-                            c.execute("DELETE FROM questions WHERE id=?", (row['id'],))
-                            conn.commit()
-                            st.rerun()
+                        
+                        # 【修改與防呆邏輯】判斷目前這題是否在「編輯模式」
+                        if st.session_state.edit_q_id == row['id']:
+                            # 編輯模式：顯示輸入框與確認/取消按鈕
+                            new_score = col3.number_input("新滿分", min_value=1, value=row['max_score'], key=f"edit_val_{row['id']}", label_visibility="collapsed")
+                            
+                            c4_1, c4_2 = col4.columns(2)
+                            if c4_1.button("✅ 確認", key=f"confirm_{row['id']}"):
+                                c.execute("UPDATE questions SET max_score=? WHERE id=?", (new_score, row['id']))
+                                conn.commit()
+                                st.session_state.edit_q_id = None # 解除編輯模式
+                                st.rerun()
+                            if c4_2.button("❌ 取消", key=f"cancel_{row['id']}"):
+                                st.session_state.edit_q_id = None # 解除編輯模式
+                                st.rerun()
+                        else:
+                            # 正常模式：顯示分數與修改/刪除按鈕
+                            col3.write(f"滿分: **{row['max_score']}**")
+                            
+                            c4_1, c4_2 = col4.columns(2)
+                            if c4_1.button("✏️ 修改", key=f"edit_btn_{row['id']}"):
+                                st.session_state.edit_q_id = row['id'] # 進入編輯模式
+                                st.rerun()
+                            if c4_2.button("🗑️ 刪除", key=f"del_q_{row['id']}"):
+                                c.execute("DELETE FROM questions WHERE id=?", (row['id'],))
+                                conn.commit()
+                                st.rerun()
                     st.divider()
 
 elif menu == "進行稽核":
