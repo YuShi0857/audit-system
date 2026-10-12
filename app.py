@@ -2,18 +2,20 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime
+import json
 
-# ================= 1. 資料庫初始化 (使用 v2 避免與舊資料衝突) =================
-conn = sqlite3.connect('audit_system_v2.db', check_same_thread=False)
+# ================= 1. 資料庫初始化 (使用 v3 支援詳細備註與留言) =================
+conn = sqlite3.connect('audit_system_v3.db', check_same_thread=False)
 c = conn.cursor()
 
 def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT)''')
+    # audits 表格新增了 details 欄位，用來儲存每一題的得分與備註
+    c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
     
-    # 寫入你指定的預設部門與權重
+    # 寫入預設部門與權重
     c.execute("SELECT COUNT(*) FROM roles")
     if c.fetchone()[0] == 0:
         default_roles = [
@@ -30,10 +32,14 @@ def init_db():
 
 init_db()
 
-# ================= 2. 側邊欄導覽 =================
+# ================= 2. 動態期別與側邊欄 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
-menu = st.sidebar.radio("系統導覽", ["進行稽核", "稽核紀錄", "部門獎金池分潤", "題庫設定", "員工與職位建檔"])
-periods = ['2026-Q1', '2026-Q2', '2026-Q3', '2026-Q4']
+
+# 自動產生從 2026 年到未來兩年的季度清單
+current_year = datetime.now().year
+periods = [f"{y}-Q{q}" for y in range(2026, current_year + 3) for q in range(1, 5)]
+
+menu = st.sidebar.radio("系統導覽", ["進行稽核", "稽核紀錄 (含篩選與明細)", "部門獎金池分潤", "題庫設定", "員工與職位建檔"])
 
 # ================= 3. 功能模組 =================
 
@@ -42,9 +48,9 @@ if menu == "員工與職位建檔":
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("1. 新增職位 (若有擴編)")
+        st.subheader("1. 新增職位")
         with st.form("add_role_form"):
-            new_dept = st.text_input("所屬部門 (例如：黃金部門、操台部門、行政部門)")
+            new_dept = st.text_input("所屬部門 (例如：黃金部門、操台部門)")
             new_role_name = st.text_input("職位名稱 (例如：行政PT)")
             is_hourly = st.checkbox("這是否為『時薪制』PT？(打勾代表用調薪邏輯，不參與獎金池)")
             weight = st.number_input("獎金池權重 (若為時薪PT請填0)", min_value=0.0, step=0.5, value=1.0)
@@ -57,7 +63,6 @@ if menu == "員工與職位建檔":
                     except sqlite3.IntegrityError:
                         st.error("此職位已存在！")
         
-        st.write("目前的部門與職位清單：")
         roles_df = pd.read_sql("SELECT department as 部門, name as 職稱, CASE WHEN is_hourly=1 THEN '是' ELSE '否' END as 時薪制, weight as 分潤權重 FROM roles ORDER BY department, weight DESC", conn)
         st.dataframe(roles_df, hide_index=True)
 
@@ -69,15 +74,12 @@ if menu == "員工與職位建檔":
             emp_role_str = st.selectbox("選擇職位", role_list) if role_list else None
             emp_wage = st.number_input("當前時薪 (非PT請維持0)", min_value=0, step=5)
             if st.form_submit_button("新增員工") and emp_role_str:
-                emp_role = emp_role_str.split(" (")[0] # 提取出職位名稱
-                # 找出該職位所屬部門
+                emp_role = emp_role_str.split(" (")[0]
                 dept = c.execute("SELECT department FROM roles WHERE name=?", (emp_role,)).fetchone()[0]
-                
                 c.execute("INSERT INTO employees (name, department, role, hourly_wage) VALUES (?, ?, ?, ?)", (emp_name, dept, emp_role, emp_wage))
                 conn.commit()
                 st.success(f"已新增員工：{emp_name} ({dept})")
                 
-        st.write("員工清單：")
         emps_df = pd.read_sql("SELECT id, name as 姓名, department as 部門, role as 職位, hourly_wage as 時薪 FROM employees ORDER BY department", conn)
         st.dataframe(emps_df, hide_index=True)
 
@@ -87,16 +89,16 @@ elif menu == "題庫設定":
     with st.form("add_q_form"):
         col_r, col_c, col_t, col_s = st.columns([2, 2, 4, 1])
         q_role = col_r.selectbox("適用職位", role_list) if role_list else None
-        q_category = col_c.text_input("大項目 (例如: 顧客服務)")
+        q_category = col_c.text_input("大項目 (相同的名稱會自動群組在一起)")
         q_title = col_t.text_input("細項問題 (例如: 態度是否親切)")
         q_score = col_s.number_input("滿分", min_value=1, value=5)
-        q_desc = st.text_input("問題說明")
+        q_desc = st.text_input("問題說明 (選填)")
         if st.form_submit_button("新增題目") and q_role:
             c.execute("INSERT INTO questions (role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?)", (q_role, q_category, q_title, q_desc, q_score))
             conn.commit()
             st.success("題目新增成功！")
             
-    q_df = pd.read_sql("SELECT id, role as 職位, category as 大項, title as 問題, max_score as 滿分 FROM questions", conn)
+    q_df = pd.read_sql("SELECT id, role as 職位, category as 大項, title as 細項問題, max_score as 滿分 FROM questions ORDER BY role, category", conn)
     st.dataframe(q_df, hide_index=True)
 
 elif menu == "進行稽核":
@@ -122,23 +124,36 @@ elif menu == "進行稽核":
                 st.error("此職位尚未建立題庫！請先至「題庫設定」新增專屬題目。")
             else:
                 with st.form("audit_form"):
-                    scores = {}
+                    scores_data = {}
                     df_q = pd.DataFrame(questions, columns=['id', 'category', 'title', 'description', 'max_score'])
+                    
+                    # 依大項目分組顯示
                     for category, group in df_q.groupby('category'):
-                        st.markdown(f"### {category}")
+                        st.markdown(f"### 📂 {category}")
                         for _, row in group.iterrows():
-                            options = list(range(row['max_score'] + 1))
-                            scores[row['id']] = st.selectbox(f"{row['title']} (滿分 {row['max_score']} 分)", options, key=f"q_{row['id']}")
-                            if row['description']: st.caption(row['description'])
+                            st.markdown(f"**{row['title']}** (滿分 {row['max_score']} 分)")
+                            if row['description']: st.caption(f"說明: {row['description']}")
+                            
+                            col_s, col_c = st.columns([1, 3])
+                            # 下拉選單給分
+                            s_val = col_s.selectbox("評分", list(range(row['max_score'] + 1)), key=f"q_{row['id']}")
+                            # 扣分原因/備註
+                            c_val = col_c.text_input("原因/備註闡述", value="無", key=f"c_{row['id']}")
+                            
+                            scores_data[row['id']] = {
+                                'category': category,
+                                'title': row['title'],
+                                'score': s_val,
+                                'comment': c_val
+                            }
                         st.markdown("---")
                         
-                    if st.form_submit_button("送出稽核結果"):
-                        total_score = sum(scores.values())
+                    if st.form_submit_button("確認並送出稽核結果"):
+                        total_score = sum([d['score'] for d in scores_data.values()])
                         role_info = c.execute("SELECT is_hourly FROM roles WHERE name=?", (emp_role,)).fetchone()
                         is_hourly = role_info[0] if role_info else 0
                         
                         wage_added = 0
-                        # PT 時薪自動調漲邏輯
                         if is_hourly == 1:
                             if total_score >= 90: wage_added = 5
                             elif total_score >= 80: wage_added = 3
@@ -146,34 +161,80 @@ elif menu == "進行稽核":
                                 c.execute("UPDATE employees SET hourly_wage = hourly_wage + ? WHERE id = ?", (wage_added, emp_id))
                                 
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp) VALUES (?, ?, ?, ?, ?, ?)", (emp_id, period, total_score, wage_added, 'submitted', timestamp))
+                        details_json = json.dumps(scores_data, ensure_ascii=False)
+                        
+                        c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                  (emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
                         conn.commit()
                         st.success(f"稽核已送出！總分：{total_score} 分。")
-                        if wage_added > 0: st.success(f"🎉 達標！員工時薪已自動調升 {wage_added} 元。")
+                        if wage_added > 0: st.success(f"🎉 達標！該 PT 員工時薪已自動調升 {wage_added} 元。")
                         st.rerun()
 
-elif menu == "稽核紀錄":
-    st.title("稽核歷史紀錄")
-    records = c.execute("SELECT a.id, a.period, e.name, e.department, e.role, a.total_score, a.wage_added, a.status, a.emp_id FROM audits a JOIN employees e ON a.emp_id = e.id ORDER BY a.id DESC").fetchall()
+elif menu == "稽核紀錄 (含篩選與明細)":
+    st.title("稽核歷史紀錄與明細查詢")
     
-    for r in records:
-        a_id, period, name, dept, role, score, wage, status, emp_id = r
-        with st.container():
-            cols = st.columns([2, 2, 2, 2, 2])
-            cols[0].write(f"**{period}**")
-            cols[1].write(f"{name} ({dept}-{role})")
-            cols[2].write(f"總分: {score}")
-            cols[3].write("✅ 已送出" if status == 'submitted' else "❌ 已撤回")
-            if status == 'submitted' and cols[4].button("撤回", key=f"recall_{a_id}"):
-                c.execute("UPDATE audits SET status='recalled' WHERE id=?", (a_id,))
-                if wage > 0: c.execute("UPDATE employees SET hourly_wage = hourly_wage - ? WHERE id=?", (wage, emp_id))
-                conn.commit()
-                st.rerun()
-            st.divider()
+    # 撈取所有紀錄
+    records = c.execute('''
+        SELECT a.id, a.period, e.name, e.department, e.role, a.total_score, a.wage_added, a.status, a.emp_id, a.timestamp, a.details 
+        FROM audits a JOIN employees e ON a.emp_id = e.id ORDER BY a.id DESC
+    ''').fetchall()
+    
+    if not records:
+        st.info("目前尚無任何稽核紀錄。")
+    else:
+        df_records = pd.DataFrame(records, columns=['id', 'period', 'name', 'department', 'role', 'score', 'wage_added', 'status', 'emp_id', 'timestamp', 'details'])
+        
+        # --- 篩選器 ---
+        st.markdown("##### 🔍 條件篩選")
+        f_col1, f_col2, f_col3 = st.columns(3)
+        filter_period = f_col1.selectbox("依期別篩選", ["全部"] + list(df_records['period'].unique()))
+        filter_role = f_col2.selectbox("依職位篩選", ["全部"] + list(df_records['role'].unique()))
+        filter_name = f_col3.selectbox("依姓名篩選", ["全部"] + list(df_records['name'].unique()))
+        
+        filtered_df = df_records.copy()
+        if filter_period != "全部": filtered_df = filtered_df[filtered_df['period'] == filter_period]
+        if filter_role != "全部": filtered_df = filtered_df[filtered_df['role'] == filter_role]
+        if filter_name != "全部": filtered_df = filtered_df[filtered_df['name'] == filter_name]
+        
+        st.markdown("---")
+        st.markdown(f"共找到 **{len(filtered_df)}** 筆紀錄：")
+        
+        # --- 顯示篩選後的紀錄 ---
+        for _, row in filtered_df.iterrows():
+            status_icon = "✅ 已送出" if row['status'] == 'submitted' else "❌ 已撤回"
+            expander_title = f"{row['period']} | {row['department']} - {row['role']} : {row['name']} | 總分: {row['score']} ({status_icon})"
+            
+            with st.expander(expander_title):
+                st.write(f"**送單時間：** {row['timestamp']}")
+                if row['wage_added'] > 0:
+                    st.success(f"💰 此期 PT 時薪調漲: +{row['wage_added']} 元")
+                
+                # 展開細項與備註
+                if row['details']:
+                    st.markdown("#### 📝 稽核明細")
+                    details_dict = json.loads(row['details'])
+                    
+                    # 整理成表格顯示更清楚
+                    detail_list = []
+                    for q_id, q_data in details_dict.items():
+                        detail_list.append({
+                            "大項目": q_data.get('category', '-'),
+                            "細項問題": q_data.get('title', '-'),
+                            "得分": q_data.get('score', 0),
+                            "備註/原因": q_data.get('comment', '無')
+                        })
+                    st.table(pd.DataFrame(detail_list))
+                
+                # 撤回按鈕
+                if row['status'] == 'submitted' and st.button("撤回此紀錄", key=f"recall_{row['id']}"):
+                    c.execute("UPDATE audits SET status='recalled' WHERE id=?", (row['id'],))
+                    if row['wage_added'] > 0: 
+                        c.execute("UPDATE employees SET hourly_wage = hourly_wage - ? WHERE id=?", (row['wage_added'], row['emp_id']))
+                    conn.commit()
+                    st.rerun()
 
 elif menu == "部門獎金池分潤":
     st.title("部門獨立獎金分潤結算 (限正職/主管)")
-    
     departments = [r[0] for r in c.execute("SELECT DISTINCT department FROM roles").fetchall()]
     
     col1, col2, col3 = st.columns(3)
@@ -182,7 +243,6 @@ elif menu == "部門獎金池分潤":
     bonus_pool = col3.number_input("該部門本期總獎金池 (元)", min_value=0, value=10000, step=1000)
     
     if st.button("執行分潤計算") and calc_dept:
-        # 只撈出該期、已送出、非PT，且屬於「所選部門」的紀錄
         query = '''
             SELECT e.name, e.role, a.total_score, r.weight 
             FROM audits a 
@@ -201,19 +261,12 @@ elif menu == "部門獎金池分潤":
                 name, role, score, weight = row
                 final_weight = weight * (score / 100.0)
                 total_final_weight += final_weight
-                results.append({
-                    "姓名": name, 
-                    "職位": role, 
-                    "總分": score, 
-                    "原設定權重": weight, 
-                    "最終計分": round(final_weight, 3)
-                })
+                results.append({"姓名": name, "職位": role, "總分": score, "原設定權重": weight, "最終計分": round(final_weight, 3)})
                 
             if total_final_weight == 0:
                 st.error("所有人的最終計分皆為0，無法分配獎金。")
             else:
                 for r in results:
-                    # 獎金計算 = (個人最終計分 / 總最終計分) * 部門獎金池
                     r["獲得獎金"] = int(round((r["最終計分"] / total_final_weight) * bonus_pool))
                 st.success(f"【{calc_dept}】結算完成！")
                 st.dataframe(pd.DataFrame(results), use_container_width=True)
