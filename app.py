@@ -134,10 +134,19 @@ elif menu == "題庫設定":
             df_q = pd.DataFrame(questions, columns=['id', 'role', 'category', 'title', 'description', 'max_score'])
             
             for r, role_group in df_q.groupby('role'):
-                st.markdown(f"### 👔 職位：{r}")
+                # === 計算該職位的總分 ===
+                role_total_score = int(role_group['max_score'].sum())
+                
+                # 超過 100 分顯示紅色警示，正常則顯示綠色
+                if role_total_score > 100:
+                    st.markdown(f"### 👔 職位：{r} | 總分：:red[{role_total_score} / 100] ⚠️已超標")
+                else:
+                    st.markdown(f"### 👔 職位：{r} | 總分：:green[{role_total_score} / 100]")
                 
                 for cat, cat_group in role_group.groupby('category'):
-                    st.markdown(f"#### 📂 大項目：{cat}")
+                    # === 計算大項目的小計 ===
+                    cat_total_score = int(cat_group['max_score'].sum())
+                    st.markdown(f"#### 📂 大項目：{cat} *(小計：{cat_total_score} 分)*")
                     
                     for _, row in cat_group.iterrows():
                         col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
