@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 import json
 
-# ================= 1. 資料庫初始化 (使用 v3 支援詳細備註與留言) =================
+# ================= 1. 資料庫初始化 =================
 conn = sqlite3.connect('audit_system_v3.db', check_same_thread=False)
 c = conn.cursor()
 
@@ -12,10 +12,8 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
-    # audits 表格新增了 details 欄位，用來儲存每一題的得分與備註
     c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
     
-    # 寫入預設部門與權重
     c.execute("SELECT COUNT(*) FROM roles")
     if c.fetchone()[0] == 0:
         default_roles = [
@@ -35,7 +33,6 @@ init_db()
 # ================= 2. 動態期別與側邊欄 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
 
-# 自動產生從 2026 年到未來兩年的季度清單
 current_year = datetime.now().year
 periods = [f"{y}-Q{q}" for y in range(2026, current_year + 3) for q in range(1, 5)]
 
@@ -86,6 +83,7 @@ if menu == "員工與職位建檔":
 elif menu == "題庫設定":
     st.title("稽核題庫管理")
     role_list = [r[0] for r in c.execute("SELECT name FROM roles").fetchall()]
+    
     with st.form("add_q_form"):
         col_r, col_c, col_t, col_s = st.columns([2, 2, 4, 1])
         q_role = col_r.selectbox("適用職位", role_list) if role_list else None
@@ -93,13 +91,57 @@ elif menu == "題庫設定":
         q_title = col_t.text_input("細項問題 (例如: 態度是否親切)")
         q_score = col_s.number_input("滿分", min_value=1, value=5)
         q_desc = st.text_input("問題說明 (選填)")
-        if st.form_submit_button("新增題目") and q_role:
-            c.execute("INSERT INTO questions (role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?)", (q_role, q_category, q_title, q_desc, q_score))
-            conn.commit()
-            st.success("題目新增成功！")
+        
+        if st.form_submit_button("新增題目"):
+            if not q_role or not q_category or not q_title:
+                st.error("請完整填寫「大項目」與「細項問題」！")
+            else:
+                c.execute("INSERT INTO questions (role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?)", (q_role, q_category, q_title, q_desc, q_score))
+                conn.commit()
+                st.success("題目新增成功！")
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("現有題庫清單與刪除")
+    
+    if not role_list:
+        st.info("請先建立職位。")
+    else:
+        filter_role = st.selectbox("篩選檢視職位", ["全部"] + role_list)
+        
+        query = "SELECT id, role, category, title, description, max_score FROM questions"
+        params = []
+        if filter_role != "全部":
+            query += " WHERE role = ?"
+            params.append(filter_role)
+        query += " ORDER BY role, category"
+        
+        questions = c.execute(query, params).fetchall()
+        
+        if not questions:
+            st.info("此職位尚無題目資料。")
+        else:
+            df_q = pd.DataFrame(questions, columns=['id', 'role', 'category', 'title', 'description', 'max_score'])
             
-    q_df = pd.read_sql("SELECT id, role as 職位, category as 大項, title as 細項問題, max_score as 滿分 FROM questions ORDER BY role, category", conn)
-    st.dataframe(q_df, hide_index=True)
+            # 1. 先依職位分群
+            for r, role_group in df_q.groupby('role'):
+                st.markdown(f"### 👔 職位：{r}")
+                
+                # 2. 再依大項目分群
+                for cat, cat_group in role_group.groupby('category'):
+                    st.markdown(f"#### 📂 大項目：{cat}")
+                    
+                    # 3. 列出該大項目下的所有細項與刪除按鈕
+                    for _, row in cat_group.iterrows():
+                        col1, col2, col3, col4 = st.columns([4, 4, 2, 2])
+                        col1.write(f"**{row['title']}**")
+                        col2.caption(row['description'] if row['description'] else "無說明")
+                        col3.write(f"滿分: {row['max_score']}")
+                        if col4.button("🗑️ 刪除", key=f"del_q_{row['id']}"):
+                            c.execute("DELETE FROM questions WHERE id=?", (row['id'],))
+                            conn.commit()
+                            st.rerun()
+                    st.divider()
 
 elif menu == "進行稽核":
     st.title("進行稽核作業")
@@ -127,7 +169,6 @@ elif menu == "進行稽核":
                     scores_data = {}
                     df_q = pd.DataFrame(questions, columns=['id', 'category', 'title', 'description', 'max_score'])
                     
-                    # 依大項目分組顯示
                     for category, group in df_q.groupby('category'):
                         st.markdown(f"### 📂 {category}")
                         for _, row in group.iterrows():
@@ -135,9 +176,7 @@ elif menu == "進行稽核":
                             if row['description']: st.caption(f"說明: {row['description']}")
                             
                             col_s, col_c = st.columns([1, 3])
-                            # 下拉選單給分
                             s_val = col_s.selectbox("評分", list(range(row['max_score'] + 1)), key=f"q_{row['id']}")
-                            # 扣分原因/備註
                             c_val = col_c.text_input("原因/備註闡述", value="無", key=f"c_{row['id']}")
                             
                             scores_data[row['id']] = {
@@ -173,7 +212,6 @@ elif menu == "進行稽核":
 elif menu == "稽核紀錄 (含篩選與明細)":
     st.title("稽核歷史紀錄與明細查詢")
     
-    # 撈取所有紀錄
     records = c.execute('''
         SELECT a.id, a.period, e.name, e.department, e.role, a.total_score, a.wage_added, a.status, a.emp_id, a.timestamp, a.details 
         FROM audits a JOIN employees e ON a.emp_id = e.id ORDER BY a.id DESC
@@ -184,7 +222,6 @@ elif menu == "稽核紀錄 (含篩選與明細)":
     else:
         df_records = pd.DataFrame(records, columns=['id', 'period', 'name', 'department', 'role', 'score', 'wage_added', 'status', 'emp_id', 'timestamp', 'details'])
         
-        # --- 篩選器 ---
         st.markdown("##### 🔍 條件篩選")
         f_col1, f_col2, f_col3 = st.columns(3)
         filter_period = f_col1.selectbox("依期別篩選", ["全部"] + list(df_records['period'].unique()))
@@ -199,7 +236,6 @@ elif menu == "稽核紀錄 (含篩選與明細)":
         st.markdown("---")
         st.markdown(f"共找到 **{len(filtered_df)}** 筆紀錄：")
         
-        # --- 顯示篩選後的紀錄 ---
         for _, row in filtered_df.iterrows():
             status_icon = "✅ 已送出" if row['status'] == 'submitted' else "❌ 已撤回"
             expander_title = f"{row['period']} | {row['department']} - {row['role']} : {row['name']} | 總分: {row['score']} ({status_icon})"
@@ -209,12 +245,9 @@ elif menu == "稽核紀錄 (含篩選與明細)":
                 if row['wage_added'] > 0:
                     st.success(f"💰 此期 PT 時薪調漲: +{row['wage_added']} 元")
                 
-                # 展開細項與備註
                 if row['details']:
                     st.markdown("#### 📝 稽核明細")
                     details_dict = json.loads(row['details'])
-                    
-                    # 整理成表格顯示更清楚
                     detail_list = []
                     for q_id, q_data in details_dict.items():
                         detail_list.append({
@@ -225,7 +258,6 @@ elif menu == "稽核紀錄 (含篩選與明細)":
                         })
                     st.table(pd.DataFrame(detail_list))
                 
-                # 撤回按鈕
                 if row['status'] == 'submitted' and st.button("撤回此紀錄", key=f"recall_{row['id']}"):
                     c.execute("UPDATE audits SET status='recalled' WHERE id=?", (row['id'],))
                     if row['wage_added'] > 0: 
