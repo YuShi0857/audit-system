@@ -134,17 +134,14 @@ elif menu == "題庫設定":
             df_q = pd.DataFrame(questions, columns=['id', 'role', 'category', 'title', 'description', 'max_score'])
             
             for r, role_group in df_q.groupby('role'):
-                # === 計算該職位的總分 ===
                 role_total_score = int(role_group['max_score'].sum())
                 
-                # 超過 100 分顯示紅色警示，正常則顯示綠色
                 if role_total_score > 100:
                     st.markdown(f"### 👔 職位：{r} | 總分：:red[{role_total_score} / 100] ⚠️已超標")
                 else:
                     st.markdown(f"### 👔 職位：{r} | 總分：:green[{role_total_score} / 100]")
                 
                 for cat, cat_group in role_group.groupby('category'):
-                    # === 計算大項目的小計 ===
                     cat_total_score = int(cat_group['max_score'].sum())
                     st.markdown(f"#### 📂 大項目：{cat} *(小計：{cat_total_score} 分)*")
                     
@@ -223,28 +220,49 @@ elif menu == "進行稽核":
                                 'comment': c_val
                             }
                         st.markdown("---")
+                    
+                    # ================= 額外加分區塊 =================
+                    st.markdown("### 🌟 額外加分 (彈性)")
+                    col_b1, col_b2 = st.columns([1, 3])
+                    bonus_score = col_b1.number_input("加分分數 (若無請維持 0)", min_value=0, value=0, step=1)
+                    bonus_reason = col_b2.text_input("加分事蹟/原因 (若有給分請務必填寫)")
+                    st.markdown("---")
                         
                     if st.form_submit_button("確認並送出稽核結果"):
-                        total_score = sum([d['score'] for d in scores_data.values()])
-                        role_info = c.execute("SELECT is_hourly FROM roles WHERE name=?", (emp_role,)).fetchone()
-                        is_hourly = role_info[0] if role_info else 0
-                        
-                        wage_added = 0
-                        if is_hourly == 1:
-                            if total_score >= 90: wage_added = 5
-                            elif total_score >= 80: wage_added = 3
-                            if wage_added > 0:
-                                c.execute("UPDATE employees SET hourly_wage = hourly_wage + ? WHERE id = ?", (wage_added, emp_id))
-                                
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        details_json = json.dumps(scores_data, ensure_ascii=False)
-                        
-                        c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                  (emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
-                        conn.commit()
-                        st.success(f"稽核已送出！總分：{total_score} 分。")
-                        if wage_added > 0: st.success(f"🎉 達標！該 PT 員工時薪已自動調升 {wage_added} 元。")
-                        st.rerun()
+                        # 防呆檢查：如果有給分，一定要寫原因
+                        if bonus_score > 0 and not bonus_reason.strip():
+                            st.error("❌ 若有給予額外加分，請務必填寫旁邊的「加分事蹟/原因」！")
+                        else:
+                            # 加上額外加分
+                            total_score = sum([d['score'] for d in scores_data.values()]) + bonus_score
+                            role_info = c.execute("SELECT is_hourly FROM roles WHERE name=?", (emp_role,)).fetchone()
+                            is_hourly = role_info[0] if role_info else 0
+                            
+                            wage_added = 0
+                            if is_hourly == 1:
+                                if total_score >= 90: wage_added = 5
+                                elif total_score >= 80: wage_added = 3
+                                if wage_added > 0:
+                                    c.execute("UPDATE employees SET hourly_wage = hourly_wage + ? WHERE id = ?", (wage_added, emp_id))
+                            
+                            # 把額外加分也寫進紀錄明細裡
+                            if bonus_score > 0:
+                                scores_data['extra_bonus'] = {
+                                    'category': '🌟 額外加分',
+                                    'title': '主管彈性表現加分',
+                                    'score': bonus_score,
+                                    'comment': bonus_reason
+                                }
+                                    
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            details_json = json.dumps(scores_data, ensure_ascii=False)
+                            
+                            c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                      (emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
+                            conn.commit()
+                            st.success(f"稽核已送出！含額外加分共計：{total_score} 分。")
+                            if wage_added > 0: st.success(f"🎉 達標！該 PT 員工時薪已自動調升 {wage_added} 元。")
+                            st.rerun()
 
 elif menu == "稽核紀錄 (含篩選與明細)":
     st.title("稽核歷史紀錄與明細查詢")
