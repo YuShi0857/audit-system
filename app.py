@@ -106,7 +106,7 @@ elif menu == "題庫設定":
                 st.rerun()
 
     st.markdown("---")
-    st.subheader("現有題庫清單 (支援修改分數與刪除)")
+    st.subheader("現有題庫清單 (支援修改內容、分數與刪除)")
     
     if not role_list:
         st.info("請先建立職位。")
@@ -136,17 +136,16 @@ elif menu == "題庫設定":
                     for _, row in cat_group.iterrows():
                         col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
                         
-                        col1.write(f"**{row['title']}**")
-                        col2.caption(row['description'] if row['description'] else "無說明")
-                        
                         # 【修改與防呆邏輯】判斷目前這題是否在「編輯模式」
                         if st.session_state.edit_q_id == row['id']:
-                            # 編輯模式：顯示輸入框與確認/取消按鈕
+                            # 編輯模式：顯示三個輸入框與確認/取消按鈕
+                            new_title = col1.text_input("修改問題", value=row['title'], key=f"edit_title_{row['id']}", label_visibility="collapsed")
+                            new_desc = col2.text_input("修改說明", value=row['description'] if row['description'] else "", key=f"edit_desc_{row['id']}", label_visibility="collapsed")
                             new_score = col3.number_input("新滿分", min_value=1, value=row['max_score'], key=f"edit_val_{row['id']}", label_visibility="collapsed")
                             
                             c4_1, c4_2 = col4.columns(2)
                             if c4_1.button("✅ 確認", key=f"confirm_{row['id']}"):
-                                c.execute("UPDATE questions SET max_score=? WHERE id=?", (new_score, row['id']))
+                                c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, row['id']))
                                 conn.commit()
                                 st.session_state.edit_q_id = None # 解除編輯模式
                                 st.rerun()
@@ -154,7 +153,9 @@ elif menu == "題庫設定":
                                 st.session_state.edit_q_id = None # 解除編輯模式
                                 st.rerun()
                         else:
-                            # 正常模式：顯示分數與修改/刪除按鈕
+                            # 正常模式：顯示文字與修改/刪除按鈕
+                            col1.write(f"**{row['title']}**")
+                            col2.caption(row['description'] if row['description'] else "無說明")
                             col3.write(f"滿分: **{row['max_score']}**")
                             
                             c4_1, c4_2 = col4.columns(2)
