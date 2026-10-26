@@ -35,6 +35,14 @@ COL_MAP = {
     "bonus_pools": {"period": "期別", "department": "部門", "pool_amount": "總獎金池"}
 }
 
+def cloud_commit(table_name):
+    conn.commit()
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    df_cht = df.rename(columns=COL_MAP[table_name]) 
+    ws = sh.worksheet(TAB_MAP[table_name])
+    ws.clear()
+    ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
+
 @st.cache_resource
 def sync_gsheets_to_local():
     for tab_eng, tab_cht in TAB_MAP.items():
@@ -42,7 +50,6 @@ def sync_gsheets_to_local():
             ws = sh.worksheet(tab_cht)
         except gspread.WorksheetNotFound:
             try:
-                # 幫你自動把舊的英文工作表改成中文
                 ws = sh.worksheet(tab_eng)
                 ws.update_title(tab_cht)
             except gspread.WorksheetNotFound:
@@ -55,7 +62,20 @@ def sync_gsheets_to_local():
             df.rename(columns=rev_map, inplace=True)
             df.to_sql(tab_eng, conn, if_exists='replace', index=False)
         else:
-            if tab_eng == "roles": c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
+            if tab_eng == "roles": 
+                c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
+                # 自動補齊 7 個預設職位
+                default_roles = [
+                    ('黃金PT', '黃金部門', 1, 0), ('黃金正職', '黃金部門', 0, 3), ('黃金主播', '黃金部門', 0, 2),
+                    ('操台PT', '操台部門', 1, 0), ('操台正職', '操台部門', 0, 1), ('操台課級', '操台部門', 0, 2), ('操台部級', '操台部門', 0, 3)
+                ]
+                c.executemany("INSERT INTO roles (name, department, is_hourly, weight) VALUES (?, ?, ?, ?)", default_roles)
+                conn.commit()
+                # 建立後立刻同步上傳 Google Sheets
+                df = pd.read_sql("SELECT * FROM roles", conn)
+                df_cht = df.rename(columns=COL_MAP["roles"])
+                ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
+                
             elif tab_eng == "employees": c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
             elif tab_eng == "questions": c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
             elif tab_eng == "audits": c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
@@ -63,14 +83,6 @@ def sync_gsheets_to_local():
             conn.commit()
 
 sync_gsheets_to_local()
-
-def cloud_commit(table_name):
-    conn.commit()
-    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-    df_cht = df.rename(columns=COL_MAP[table_name]) # 轉換為中文標題上傳
-    ws = sh.worksheet(TAB_MAP[table_name])
-    ws.clear()
-    ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
 
 # ================= 2. 系統設定與狀態初始化 =================
 if 'edit_q_id' not in st.session_state: st.session_state.edit_q_id = None
