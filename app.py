@@ -158,7 +158,11 @@ if menu == "員工與職位建檔":
             h5.write("**操作**")
             st.divider()
             for emp in emps:
-                e_id, e_name, e_dept, e_role, e_wage = emp
+                try:
+                    e_id = int(float(emp[0]))
+                except:
+                    continue
+                e_name, e_dept, e_role, e_wage = emp[1], emp[2], emp[3], emp[4]
                 c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 2, 2])
                 if st.session_state.edit_emp_id == e_id:
                     new_name = c1.text_input("姓名", value=e_name, key=f"e_name_{e_id}", label_visibility="collapsed")
@@ -290,27 +294,32 @@ elif menu == "題庫設定":
         else:
             df_q = pd.DataFrame(questions, columns=['id', 'role', 'category', 'title', 'description', 'max_score'])
             for r, role_group in df_q.groupby('role'):
-                role_total_score = int(role_group['max_score'].sum())
-                if role_total_score > 100: st.markdown(f"### 👔 職位：{r} | 總分：:red[{role_total_score} / 100] ⚠️已超標")
-                else: st.markdown(f"### 👔 職位：{r} | 總分：:green[{role_total_score} / 100]")
+                role_total_score = pd.to_numeric(role_group['max_score'], errors='coerce').fillna(0).sum()
+                if role_total_score > 100: st.markdown(f"### 👔 職位：{r} | 總分：:red[{int(role_total_score)} / 100] ⚠️已超標")
+                else: st.markdown(f"### 👔 職位：{r} | 總分：:green[{int(role_total_score)} / 100]")
                 
                 for cat, cat_group in role_group.groupby('category'):
-                    cat_total_score = int(cat_group['max_score'].sum())
-                    st.markdown(f"#### 📂 大項目：{cat} *(小計：{cat_total_score} 分)*")
+                    cat_total_score = pd.to_numeric(cat_group['max_score'], errors='coerce').fillna(0).sum()
+                    st.markdown(f"#### 📂 大項目：{cat} *(小計：{int(cat_total_score)} 分)*")
                     for _, row in cat_group.iterrows():
+                        # 安全防護：過濾掉來自 Google Sheets 的空白或無效列
+                        try:
+                            valid_id = int(float(row['id']))
+                            q_id_str = str(valid_id)
+                            valid_score = int(float(row['max_score']))
+                        except (ValueError, TypeError):
+                            continue # 直接忽略異常資料，防止當機
+                            
                         col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
-                        
-                        # 強制轉換所有型別，阻絕 Pandas 格式衝突
-                        q_id_str = str(int(row['id']))
                         
                         if str(st.session_state.edit_q_id) == q_id_str:
                             new_title = col1.text_input("修改", value=str(row['title']), key=f"et_{q_id_str}", label_visibility="collapsed")
                             desc_val = str(row['description']) if pd.notna(row['description']) and str(row['description']) != 'None' else ""
                             new_desc = col2.text_input("說明", value=desc_val, key=f"ed_{q_id_str}", label_visibility="collapsed")
-                            new_score = col3.number_input("分", min_value=1, value=int(row['max_score']), key=f"ev_{q_id_str}", label_visibility="collapsed")
+                            new_score = col3.number_input("分", min_value=1, value=valid_score, key=f"ev_{q_id_str}", label_visibility="collapsed")
                             c4_1, c4_2 = col4.columns(2)
                             if c4_1.button("✅", key=f"c_{q_id_str}"):
-                                c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, int(row['id'])))
+                                c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, valid_id))
                                 cloud_commit("questions")
                                 st.session_state.edit_q_id = None
                                 st.rerun()
@@ -321,13 +330,13 @@ elif menu == "題庫設定":
                             col1.write(f"**{row['title']}**")
                             desc_text = str(row['description']) if pd.notna(row['description']) and str(row['description']) != 'None' else "無說明"
                             col2.caption(desc_text)
-                            col3.write(f"滿分: **{int(row['max_score'])}**")
+                            col3.write(f"滿分: **{valid_score}**")
                             c4_1, c4_2 = col4.columns(2)
                             if c4_1.button("✏️ 修改", key=f"eb_{q_id_str}"):
                                 st.session_state.edit_q_id = q_id_str
                                 st.rerun()
                             if c4_2.button("🗑️ 刪除", key=f"dq_{q_id_str}"):
-                                c.execute("DELETE FROM questions WHERE id=?", (int(row['id']),))
+                                c.execute("DELETE FROM questions WHERE id=?", (valid_id,))
                                 cloud_commit("questions")
                                 st.rerun()
                     st.divider()
@@ -361,12 +370,18 @@ elif menu == "進行稽核":
                     for category, group in df_q.groupby('category'):
                         st.markdown(f"### 📂 {category}")
                         for _, row in group.iterrows():
-                            st.markdown(f"**{row['title']}** (滿分 {int(row['max_score'])} 分)")
+                            try:
+                                valid_id = int(float(row['id']))
+                                valid_score = int(float(row['max_score']))
+                            except:
+                                continue
+                                
+                            st.markdown(f"**{row['title']}** (滿分 {valid_score} 分)")
                             if pd.notna(row['description']) and str(row['description']) != 'None': st.caption(f"說明: {row['description']}")
                             col_s, col_c = st.columns([1, 3])
-                            s_val = col_s.selectbox("評分", list(range(int(row['max_score']) + 1)), key=f"q_{row['id']}")
-                            c_val = col_c.text_input("原因/備註闡述", value="無", key=f"c_{row['id']}")
-                            scores_data[row['id']] = {'category': category, 'title': row['title'], 'score': s_val, 'comment': c_val}
+                            s_val = col_s.selectbox("評分", list(range(valid_score + 1)), key=f"q_{valid_id}")
+                            c_val = col_c.text_input("原因/備註闡述", value="無", key=f"c_{valid_id}")
+                            scores_data[valid_id] = {'category': category, 'title': row['title'], 'score': s_val, 'comment': c_val}
                         st.markdown("---")
                     
                     st.markdown("### 🌟 額外加分 (彈性)")
@@ -475,7 +490,7 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                         
                         detail_list = []
                         for q_id, q_data in details_dict.items():
-                            if q_id == 'wage_info': continue
+                            if str(q_id) == 'wage_info': continue
                             c_name = q_data.get('category', '-')
                             t_name = q_data.get('title', '-')
                             s_val = q_data.get('score', 0)
