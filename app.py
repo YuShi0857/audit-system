@@ -40,8 +40,11 @@ def cloud_commit(table_name):
     df_cht = df.rename(columns=COL_MAP[table_name]) 
     ws = sh.worksheet(TAB_MAP[table_name])
     ws.clear()
+    
     if not df_cht.empty:
-        ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
+        # 透過 JSON 轉換，把特殊數字格式強制洗成 Google 看得懂的標準格式
+        safe_values = json.loads(df_cht.to_json(orient='values'))
+        ws.update([df_cht.columns.values.tolist()] + safe_values)
     else:
         ws.update([df_cht.columns.values.tolist()])
 
@@ -87,7 +90,8 @@ def sync_gsheets_to_local():
             df_cht = df.rename(columns=COL_MAP[tab_eng])
             ws.clear()
             if not df_cht.empty:
-                ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
+                safe_values = json.loads(df_cht.to_json(orient='values'))
+                ws.update([df_cht.columns.values.tolist()] + safe_values)
             else:
                 ws.update([df_cht.columns.values.tolist()])
 
