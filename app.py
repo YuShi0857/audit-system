@@ -10,47 +10,67 @@ from google.oauth2.service_account import Credentials
 # ================= 1. Google Sheets 與 資料庫初始化 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
 
-# 設定 Google Sheets 連線
 scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 creds = Credentials.from_service_account_info(json.loads(st.secrets["google_credentials"]), scopes=scope)
 gc = gspread.authorize(creds)
-sh = gc.open("稽核系統資料庫") # 確保你的試算表名稱與這裡一致
+sh = gc.open("稽核系統資料庫") 
 
 conn = sqlite3.connect('audit_system_cloud.db', check_same_thread=False)
 c = conn.cursor()
-tables = ["roles", "employees", "questions", "audits", "bonus_pools"]
 
-# 初始化雲端試算表分頁與本地資料庫同步
+# 雲端報表中英對照翻譯字典
+TAB_MAP = {
+    "roles": "1_職位設定",
+    "employees": "2_員工資料",
+    "questions": "3_稽核題庫",
+    "audits": "4_稽核紀錄",
+    "bonus_pools": "5_獎金池紀錄"
+}
+
+COL_MAP = {
+    "roles": {"name": "職位名稱", "department": "部門", "is_hourly": "時薪制(1是0否)", "weight": "分潤權重"},
+    "employees": {"id": "編號", "name": "姓名", "department": "部門", "role": "職位", "hourly_wage": "時薪"},
+    "questions": {"id": "編號", "role": "適用職位", "category": "大項目", "title": "題目", "description": "說明", "max_score": "滿分"},
+    "audits": {"id": "編號", "emp_id": "員工編號", "period": "期別", "total_score": "總分", "wage_added": "調薪金額", "status": "狀態", "timestamp": "時間", "details": "評分明細JSON"},
+    "bonus_pools": {"period": "期別", "department": "部門", "pool_amount": "總獎金池"}
+}
+
 @st.cache_resource
 def sync_gsheets_to_local():
-    for tab in tables:
+    for tab_eng, tab_cht in TAB_MAP.items():
         try:
-            ws = sh.worksheet(tab)
+            ws = sh.worksheet(tab_cht)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=tab, rows="100", cols="20")
-            
+            try:
+                # 幫你自動把舊的英文工作表改成中文
+                ws = sh.worksheet(tab_eng)
+                ws.update_title(tab_cht)
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title=tab_cht, rows="100", cols="20")
+                
         data = ws.get_all_records()
         if data:
             df = pd.DataFrame(data)
-            df.to_sql(tab, conn, if_exists='replace', index=False)
+            rev_map = {v: k for k, v in COL_MAP[tab_eng].items()}
+            df.rename(columns=rev_map, inplace=True)
+            df.to_sql(tab_eng, conn, if_exists='replace', index=False)
         else:
-            # 若雲端是空的，建立空資料表
-            if tab == "roles": c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
-            elif tab == "employees": c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
-            elif tab == "questions": c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
-            elif tab == "audits": c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
-            elif tab == "bonus_pools": c.execute('''CREATE TABLE IF NOT EXISTS bonus_pools (period TEXT, department TEXT, pool_amount INTEGER)''')
+            if tab_eng == "roles": c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
+            elif tab_eng == "employees": c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
+            elif tab_eng == "questions": c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
+            elif tab_eng == "audits": c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
+            elif tab_eng == "bonus_pools": c.execute('''CREATE TABLE IF NOT EXISTS bonus_pools (period TEXT, department TEXT, pool_amount INTEGER)''')
             conn.commit()
 
 sync_gsheets_to_local()
 
-# 自訂 Commit 函數：每次更新資料庫時，順便把該 Table 上傳回 Google Sheets
 def cloud_commit(table_name):
     conn.commit()
     df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
-    ws = sh.worksheet(table_name)
+    df_cht = df.rename(columns=COL_MAP[table_name]) # 轉換為中文標題上傳
+    ws = sh.worksheet(TAB_MAP[table_name])
     ws.clear()
-    ws.update([df.columns.values.tolist()] + df.values.tolist())
+    ws.update([df_cht.columns.values.tolist()] + df_cht.values.tolist())
 
 # ================= 2. 系統設定與狀態初始化 =================
 if 'edit_q_id' not in st.session_state: st.session_state.edit_q_id = None
@@ -154,7 +174,6 @@ if menu == "員工與職位建檔":
 
     with tab_roles:
         st.subheader("職位資料管理")
-        st.info("💡 提示：若修改職稱或部門名稱，系統會自動同步更新底下所有員工與題庫的對應標籤。")
         roles = c.execute("SELECT name, department, is_hourly, weight FROM roles ORDER BY department, weight DESC").fetchall()
         if roles:
             rh1, rh2, rh3, rh4, rh5 = st.columns([3, 3, 2, 2, 2])
