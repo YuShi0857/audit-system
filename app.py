@@ -4,33 +4,55 @@ import pandas as pd
 from datetime import datetime
 import json
 import io
+import gspread
+from google.oauth2.service_account import Credentials
 
-# ================= 1. 資料庫初始化 =================
-conn = sqlite3.connect('audit_system_v3.db', check_same_thread=False)
-c = conn.cursor()
-
-def init_db():
-    c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
-    # 新增：用來記憶每期各部門的總獎金池設定
-    c.execute('''CREATE TABLE IF NOT EXISTS bonus_pools (period TEXT, department TEXT, pool_amount INTEGER, PRIMARY KEY(period, department))''')
-    
-    c.execute("SELECT COUNT(*) FROM roles")
-    if c.fetchone()[0] == 0:
-        default_roles = [
-            ('黃金PT', '黃金部門', 1, 0), ('黃金正職', '黃金部門', 0, 3), ('黃金主播', '黃金部門', 0, 2),
-            ('操台PT', '操台部門', 1, 0), ('操台正職', '操台部門', 0, 1), ('操台課級', '操台部門', 0, 2), ('操台部級', '操台部門', 0, 3)
-        ]
-        c.executemany("INSERT INTO roles (name, department, is_hourly, weight) VALUES (?, ?, ?, ?)", default_roles)
-    conn.commit()
-
-init_db()
-
-# ================= 2. 系統設定與狀態初始化 =================
+# ================= 1. Google Sheets 與 資料庫初始化 =================
 st.set_page_config(page_title="稽核與獎金系統", layout="wide")
 
+# 設定 Google Sheets 連線
+scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+creds = Credentials.from_service_account_info(json.loads(st.secrets["google_credentials"]), scopes=scope)
+gc = gspread.authorize(creds)
+sh = gc.open("稽核系統資料庫") # 確保你的試算表名稱與這裡一致
+
+conn = sqlite3.connect('audit_system_cloud.db', check_same_thread=False)
+c = conn.cursor()
+tables = ["roles", "employees", "questions", "audits", "bonus_pools"]
+
+# 初始化雲端試算表分頁與本地資料庫同步
+@st.cache_resource
+def sync_gsheets_to_local():
+    for tab in tables:
+        try:
+            ws = sh.worksheet(tab)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=tab, rows="100", cols="20")
+            
+        data = ws.get_all_records()
+        if data:
+            df = pd.DataFrame(data)
+            df.to_sql(tab, conn, if_exists='replace', index=False)
+        else:
+            # 若雲端是空的，建立空資料表
+            if tab == "roles": c.execute('''CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, department TEXT, is_hourly INTEGER, weight REAL)''')
+            elif tab == "employees": c.execute('''CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, department TEXT, role TEXT, hourly_wage REAL)''')
+            elif tab == "questions": c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, category TEXT, title TEXT, description TEXT, max_score INTEGER)''')
+            elif tab == "audits": c.execute('''CREATE TABLE IF NOT EXISTS audits (id INTEGER PRIMARY KEY AUTOINCREMENT, emp_id INTEGER, period TEXT, total_score INTEGER, wage_added REAL, status TEXT, timestamp TEXT, details TEXT)''')
+            elif tab == "bonus_pools": c.execute('''CREATE TABLE IF NOT EXISTS bonus_pools (period TEXT, department TEXT, pool_amount INTEGER)''')
+            conn.commit()
+
+sync_gsheets_to_local()
+
+# 自訂 Commit 函數：每次更新資料庫時，順便把該 Table 上傳回 Google Sheets
+def cloud_commit(table_name):
+    conn.commit()
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    ws = sh.worksheet(table_name)
+    ws.clear()
+    ws.update([df.columns.values.tolist()] + df.values.tolist())
+
+# ================= 2. 系統設定與狀態初始化 =================
 if 'edit_q_id' not in st.session_state: st.session_state.edit_q_id = None
 if 'edit_emp_id' not in st.session_state: st.session_state.edit_emp_id = None
 if 'edit_role_name' not in st.session_state: st.session_state.edit_role_name = None
@@ -56,7 +78,7 @@ if menu == "員工與職位建檔":
                 if new_dept and new_role_name:
                     try:
                         c.execute("INSERT INTO roles (name, department, is_hourly, weight) VALUES (?, ?, ?, ?)", (new_role_name, new_dept, 1 if is_hourly else 0, weight))
-                        conn.commit()
+                        cloud_commit("roles")
                         st.success(f"已新增：{new_dept} - {new_role_name}")
                         st.rerun()
                     except sqlite3.IntegrityError:
@@ -73,7 +95,7 @@ if menu == "員工與職位建檔":
                 emp_role = emp_role_str.split(" (")[0]
                 dept = c.execute("SELECT department FROM roles WHERE name=?", (emp_role,)).fetchone()[0]
                 c.execute("INSERT INTO employees (name, department, role, hourly_wage) VALUES (?, ?, ?, ?)", (emp_name, dept, emp_role, emp_wage))
-                conn.commit()
+                cloud_commit("employees")
                 st.success(f"已新增員工：{emp_name} ({dept})")
                 st.rerun()
 
@@ -109,7 +131,7 @@ if menu == "員工與職位建檔":
                         nr = new_role_str.split(" (")[0]
                         nd = c.execute("SELECT department FROM roles WHERE name=?", (nr,)).fetchone()[0]
                         c.execute("UPDATE employees SET name=?, department=?, role=?, hourly_wage=? WHERE id=?", (new_name, nd, nr, new_wage, e_id))
-                        conn.commit()
+                        cloud_commit("employees")
                         st.session_state.edit_emp_id = None
                         st.rerun()
                     if c5b.button("❌", key=f"e_cancel_{e_id}"):
@@ -126,7 +148,7 @@ if menu == "員工與職位建檔":
                         st.rerun()
                     if c5b.button("🗑️ 刪除", key=f"e_del_{e_id}"):
                         c.execute("DELETE FROM employees WHERE id=?", (e_id,))
-                        conn.commit()
+                        cloud_commit("employees")
                         st.rerun()
                 st.markdown("---")
 
@@ -157,8 +179,10 @@ if menu == "員工與職位建檔":
                                 c.execute("UPDATE roles SET name=?, department=?, is_hourly=?, weight=? WHERE name=?", (new_name, new_dept, 1 if new_hourly else 0, new_weight, r_name))
                                 if new_name != r_name or new_dept != r_dept:
                                     c.execute("UPDATE employees SET role=?, department=? WHERE role=?", (new_name, new_dept, r_name))
+                                    cloud_commit("employees")
                                     c.execute("UPDATE questions SET role=? WHERE role=?", (new_name, r_name))
-                                conn.commit()
+                                    cloud_commit("questions")
+                                cloud_commit("roles")
                                 st.session_state.edit_role_name = None
                                 st.rerun()
                             except sqlite3.IntegrityError:
@@ -177,7 +201,7 @@ if menu == "員工與職位建檔":
                         st.rerun()
                     if rc5b.button("🗑️ 刪除", key=f"r_del_{r_name}"):
                         c.execute("DELETE FROM roles WHERE name=?", (r_name,))
-                        conn.commit()
+                        cloud_commit("roles")
                         st.rerun()
                 st.markdown("---")
 
@@ -202,7 +226,7 @@ elif menu == "題庫設定":
             else:
                 for role in final_roles:
                     c.execute("INSERT INTO questions (role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?)", (role, q_category, q_title, q_desc, q_score))
-                conn.commit()
+                cloud_commit("questions")
                 st.success(f"題目新增成功！已同步套用至 {len(final_roles)} 個職位。")
                 st.rerun()
 
@@ -241,7 +265,7 @@ elif menu == "題庫設定":
                             c4_1, c4_2 = col4.columns(2)
                             if c4_1.button("✅", key=f"c_{row['id']}"):
                                 c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, row['id']))
-                                conn.commit()
+                                cloud_commit("questions")
                                 st.session_state.edit_q_id = None
                                 st.rerun()
                             if c4_2.button("❌", key=f"x_{row['id']}"):
@@ -257,7 +281,7 @@ elif menu == "題庫設定":
                                 st.rerun()
                             if c4_2.button("🗑️ 刪除", key=f"dq_{row['id']}"):
                                 c.execute("DELETE FROM questions WHERE id=?", (row['id'],))
-                                conn.commit()
+                                cloud_commit("questions")
                                 st.rerun()
                     st.divider()
 
@@ -322,19 +346,18 @@ elif menu == "進行稽核":
                                 if wage_added > 0:
                                     new_wage = old_wage + wage_added
                                     c.execute("UPDATE employees SET hourly_wage = ? WHERE id = ?", (new_wage, emp_id))
+                                    cloud_commit("employees")
                             
                             if bonus_score > 0:
                                 scores_data['extra_bonus'] = {'category': '🌟 額外加分', 'title': '主管彈性表現加分', 'score': bonus_score, 'comment': bonus_reason}
                             
-                            # 儲存時薪變化紀錄供歷史查詢
                             scores_data['wage_info'] = {'old': old_wage, 'new': new_wage}
-                            
                             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             details_json = json.dumps(scores_data, ensure_ascii=False)
                             
                             c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                                       (emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
-                            conn.commit()
+                            cloud_commit("audits")
                             st.success(f"稽核已送出！含額外加分共計：{total_score} 分。")
                             if wage_added > 0: st.success(f"🎉 達標！該 PT 員工時薪已自動調升 {wage_added} 元。")
                             st.rerun()
@@ -342,7 +365,6 @@ elif menu == "進行稽核":
 elif menu == "稽核紀錄 (分類與 Excel 匯出)":
     st.title("稽核歷史紀錄與 Excel 報表匯出")
     
-    # 抓取所有已送出的紀錄
     records = c.execute('''
         SELECT a.id, a.period, e.name, e.department, e.role, a.total_score, a.wage_added, a.status, a.emp_id, a.timestamp, a.details, r.is_hourly, r.weight
         FROM audits a JOIN employees e ON a.emp_id = e.id JOIN roles r ON e.role = r.name
@@ -353,15 +375,12 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
     if not records:
         st.info("目前尚無任何已送出的稽核紀錄。")
     else:
-        # ====== 準備 Excel 匯出資料 ======
         summary_data = []
         detail_data = []
         
-        # 為了計算獎金，先抓取所有的獎金池設定
         pools = c.execute("SELECT period, department, pool_amount FROM bonus_pools").fetchall()
         pool_dict = {f"{p[0]}_{p[1]}": p[2] for p in pools}
         
-        # 預先計算每一期、每個部門的總分潤權重 (分母)
         period_dept_total_weights = {}
         for r in records:
             p, dept, is_hourly, score, weight = r[1], r[3], r[11], r[5], r[12]
@@ -370,7 +389,6 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                 final_w = weight * (score / 100.0)
                 period_dept_total_weights[key] = period_dept_total_weights.get(key, 0) + final_w
                 
-        # ====== 畫面顯示區塊 (按期別分類) ======
         unique_periods = sorted(list(set([r[1] for r in records])), reverse=True)
         
         for up in unique_periods:
@@ -386,7 +404,6 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                     old_wage = wage_info.get('old', '無資料')
                     new_wage = wage_info.get('new', '無資料')
                     
-                    # 計算獎金
                     bonus_str = "不適用"
                     bonus_val = 0
                     if is_hourly == 0:
@@ -400,18 +417,15 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                     else:
                         bonus_str = f"時薪調整: {old_wage} ➔ {new_wage}"
                     
-                    # 寫入 Excel 總表
                     summary_data.append({
                         "期別": p, "部門": dept, "職位": role, "姓名": name, "類型": "PT" if is_hourly else "正職/主管",
                         "稽核總分": score, "調整前時薪": old_wage if is_hourly else "-", "調整後時薪": new_wage if is_hourly else "-",
                         "分發獎金": bonus_val if not is_hourly else "-"
                     })
                     
-                    # 第一層顯示個人總結
                     with st.expander(f"👤 {dept} - {role}：{name} | 總分: {score} | {bonus_str}"):
                         st.write(f"**送單時間：** {timestamp}")
                         
-                        # 寫入 Excel 明細並顯示在網頁
                         detail_list = []
                         for q_id, q_data in details_dict.items():
                             if q_id == 'wage_info': continue
@@ -421,7 +435,6 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                             comment = q_data.get('comment', '無')
                             
                             detail_list.append({"大項目": c_name, "細項問題": t_name, "得分": s_val, "備註/原因": comment})
-                            
                             detail_data.append({
                                 "期別": p, "部門": dept, "職位": role, "姓名": name,
                                 "大項目": c_name, "細項問題": t_name, "得分": s_val, "備註/原因": comment
@@ -430,12 +443,12 @@ elif menu == "稽核紀錄 (分類與 Excel 匯出)":
                         
                         if st.button("撤回此紀錄", key=f"recall_{a_id}"):
                             c.execute("UPDATE audits SET status='recalled' WHERE id=?", (a_id,))
+                            cloud_commit("audits")
                             if is_hourly == 1 and wage_added > 0: 
                                 c.execute("UPDATE employees SET hourly_wage = hourly_wage - ? WHERE id=?", (wage_added, emp_id))
-                            conn.commit()
+                                cloud_commit("employees")
                             st.rerun()
 
-        # ====== 產生 Excel 檔案下載按鈕 ======
         st.markdown("---")
         st.markdown("### 📥 下載完整 Excel 報表")
         
@@ -472,9 +485,9 @@ elif menu == "部門獎金池分潤":
         if not valid_audits:
             st.warning(f"本期【{calc_dept}】尚未有任何符合條件的正職/主管稽核紀錄。")
         else:
-            # 儲存獎金池設定到資料庫 (供稽核紀錄頁面讀取)
-            c.execute("REPLACE INTO bonus_pools (period, department, pool_amount) VALUES (?, ?, ?)", (calc_period, calc_dept, bonus_pool))
-            conn.commit()
+            c.execute("DELETE FROM bonus_pools WHERE period=? AND department=?", (calc_period, calc_dept))
+            c.execute("INSERT INTO bonus_pools (period, department, pool_amount) VALUES (?, ?, ?)", (calc_period, calc_dept, bonus_pool))
+            cloud_commit("bonus_pools")
             
             results = []
             total_final_weight = 0
