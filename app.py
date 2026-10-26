@@ -47,6 +47,14 @@ def cloud_commit(table_name):
     else:
         ws.update([df_cht.columns.values.tolist()])
 
+def get_next_id(table_name):
+    # 強制手動計算下一個流水號，防止 AUTOINCREMENT 遺失
+    try:
+        max_id = c.execute(f"SELECT MAX(CAST(id AS INTEGER)) FROM {table_name}").fetchone()[0]
+        return (int(max_id) if max_id else 0) + 1
+    except:
+        return 1
+
 @st.cache_resource
 def sync_gsheets_to_local():
     for tab_eng, tab_cht in TAB_MAP.items():
@@ -136,7 +144,8 @@ if menu == "員工與職位建檔":
             if st.form_submit_button("新增員工") and emp_role_str:
                 emp_role = emp_role_str.split(" (")[0]
                 dept = c.execute("SELECT department FROM roles WHERE name=?", (emp_role,)).fetchone()[0]
-                c.execute("INSERT INTO employees (name, department, role, hourly_wage) VALUES (?, ?, ?, ?)", (emp_name, dept, emp_role, emp_wage))
+                next_id = get_next_id('employees')
+                c.execute("INSERT INTO employees (id, name, department, role, hourly_wage) VALUES (?, ?, ?, ?, ?)", (next_id, emp_name, dept, emp_role, emp_wage))
                 cloud_commit("employees")
                 st.success(f"已新增員工：{emp_name} ({dept})")
                 st.rerun()
@@ -269,8 +278,10 @@ elif menu == "題庫設定":
             if not final_roles or not q_category or not q_title:
                 st.error("請完整填寫「適用職位」、「大項目」與「細項問題」！")
             else:
+                next_id = get_next_id('questions')
                 for role in final_roles:
-                    c.execute("INSERT INTO questions (role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?)", (role, q_category, q_title, q_desc, q_score))
+                    c.execute("INSERT INTO questions (id, role, category, title, description, max_score) VALUES (?, ?, ?, ?, ?, ?)", (next_id, role, q_category, q_title, q_desc, q_score))
+                    next_id += 1
                 cloud_commit("questions")
                 st.success(f"題目新增成功！已同步套用至 {len(final_roles)} 個職位。")
                 st.rerun()
@@ -302,13 +313,12 @@ elif menu == "題庫設定":
                     cat_total_score = pd.to_numeric(cat_group['max_score'], errors='coerce').fillna(0).sum()
                     st.markdown(f"#### 📂 大項目：{cat} *(小計：{int(cat_total_score)} 分)*")
                     for _, row in cat_group.iterrows():
-                        # 安全防護：過濾掉來自 Google Sheets 的空白或無效列
                         try:
                             valid_id = int(float(row['id']))
                             q_id_str = str(valid_id)
                             valid_score = int(float(row['max_score']))
                         except (ValueError, TypeError):
-                            continue # 直接忽略異常資料，防止當機
+                            continue 
                             
                         col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
                         
@@ -417,8 +427,9 @@ elif menu == "進行稽核":
                             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             details_json = json.dumps(scores_data, ensure_ascii=False)
                             
-                            c.execute("INSERT INTO audits (emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                      (emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
+                            next_id = get_next_id('audits')
+                            c.execute("INSERT INTO audits (id, emp_id, period, total_score, wage_added, status, timestamp, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                                      (next_id, emp_id, period, total_score, wage_added, 'submitted', timestamp, details_json))
                             cloud_commit("audits")
                             st.success(f"稽核已送出！含額外加分共計：{total_score} 分。")
                             if wage_added > 0: st.success(f"🎉 達標！該 PT 員工時薪已自動調升 {wage_added} 元。")
