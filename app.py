@@ -42,7 +42,6 @@ def cloud_commit(table_name):
     ws.clear()
     
     if not df_cht.empty:
-        # 透過 JSON 轉換，把特殊數字格式強制洗成 Google 看得懂的標準格式
         safe_values = json.loads(df_cht.to_json(orient='values'))
         ws.update([df_cht.columns.values.tolist()] + safe_values)
     else:
@@ -60,7 +59,6 @@ def sync_gsheets_to_local():
             except gspread.WorksheetNotFound:
                 ws = sh.add_worksheet(title=tab_cht, rows="100", cols="20")
                 
-        # 防呆機制：如果試算表完全空白，避免發生錯誤
         try:
             data = ws.get_all_records()
         except Exception:
@@ -85,7 +83,6 @@ def sync_gsheets_to_local():
             elif tab_eng == "bonus_pools": c.execute('''CREATE TABLE IF NOT EXISTS bonus_pools (period TEXT, department TEXT, pool_amount INTEGER)''')
             conn.commit()
             
-            # 初始化時自動補上中文標題列
             df = pd.read_sql(f"SELECT * FROM {tab_eng}", conn)
             df_cht = df.rename(columns=COL_MAP[tab_eng])
             ws.clear()
@@ -302,29 +299,35 @@ elif menu == "題庫設定":
                     st.markdown(f"#### 📂 大項目：{cat} *(小計：{cat_total_score} 分)*")
                     for _, row in cat_group.iterrows():
                         col1, col2, col3, col4 = st.columns([3, 3, 2, 3])
-                        if st.session_state.edit_q_id == row['id']:
-                            new_title = col1.text_input("修改", value=row['title'], key=f"et_{row['id']}", label_visibility="collapsed")
-                            new_desc = col2.text_input("說明", value=row['description'] if row['description'] else "", key=f"ed_{row['id']}", label_visibility="collapsed")
-                            new_score = col3.number_input("分", min_value=1, value=row['max_score'], key=f"ev_{row['id']}", label_visibility="collapsed")
+                        
+                        # 強制轉換所有型別，阻絕 Pandas 格式衝突
+                        q_id_str = str(int(row['id']))
+                        
+                        if str(st.session_state.edit_q_id) == q_id_str:
+                            new_title = col1.text_input("修改", value=str(row['title']), key=f"et_{q_id_str}", label_visibility="collapsed")
+                            desc_val = str(row['description']) if pd.notna(row['description']) and str(row['description']) != 'None' else ""
+                            new_desc = col2.text_input("說明", value=desc_val, key=f"ed_{q_id_str}", label_visibility="collapsed")
+                            new_score = col3.number_input("分", min_value=1, value=int(row['max_score']), key=f"ev_{q_id_str}", label_visibility="collapsed")
                             c4_1, c4_2 = col4.columns(2)
-                            if c4_1.button("✅", key=f"c_{row['id']}"):
-                                c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, row['id']))
+                            if c4_1.button("✅", key=f"c_{q_id_str}"):
+                                c.execute("UPDATE questions SET title=?, description=?, max_score=? WHERE id=?", (new_title, new_desc, new_score, int(row['id'])))
                                 cloud_commit("questions")
                                 st.session_state.edit_q_id = None
                                 st.rerun()
-                            if c4_2.button("❌", key=f"x_{row['id']}"):
+                            if c4_2.button("❌", key=f"x_{q_id_str}"):
                                 st.session_state.edit_q_id = None
                                 st.rerun()
                         else:
                             col1.write(f"**{row['title']}**")
-                            col2.caption(row['description'] if row['description'] else "無說明")
-                            col3.write(f"滿分: **{row['max_score']}**")
+                            desc_text = str(row['description']) if pd.notna(row['description']) and str(row['description']) != 'None' else "無說明"
+                            col2.caption(desc_text)
+                            col3.write(f"滿分: **{int(row['max_score'])}**")
                             c4_1, c4_2 = col4.columns(2)
-                            if c4_1.button("✏️ 修改", key=f"eb_{row['id']}"):
-                                st.session_state.edit_q_id = row['id']
+                            if c4_1.button("✏️ 修改", key=f"eb_{q_id_str}"):
+                                st.session_state.edit_q_id = q_id_str
                                 st.rerun()
-                            if c4_2.button("🗑️ 刪除", key=f"dq_{row['id']}"):
-                                c.execute("DELETE FROM questions WHERE id=?", (row['id'],))
+                            if c4_2.button("🗑️ 刪除", key=f"dq_{q_id_str}"):
+                                c.execute("DELETE FROM questions WHERE id=?", (int(row['id']),))
                                 cloud_commit("questions")
                                 st.rerun()
                     st.divider()
@@ -358,10 +361,10 @@ elif menu == "進行稽核":
                     for category, group in df_q.groupby('category'):
                         st.markdown(f"### 📂 {category}")
                         for _, row in group.iterrows():
-                            st.markdown(f"**{row['title']}** (滿分 {row['max_score']} 分)")
-                            if row['description']: st.caption(f"說明: {row['description']}")
+                            st.markdown(f"**{row['title']}** (滿分 {int(row['max_score'])} 分)")
+                            if pd.notna(row['description']) and str(row['description']) != 'None': st.caption(f"說明: {row['description']}")
                             col_s, col_c = st.columns([1, 3])
-                            s_val = col_s.selectbox("評分", list(range(row['max_score'] + 1)), key=f"q_{row['id']}")
+                            s_val = col_s.selectbox("評分", list(range(int(row['max_score']) + 1)), key=f"q_{row['id']}")
                             c_val = col_c.text_input("原因/備註闡述", value="無", key=f"c_{row['id']}")
                             scores_data[row['id']] = {'category': category, 'title': row['title'], 'score': s_val, 'comment': c_val}
                         st.markdown("---")
